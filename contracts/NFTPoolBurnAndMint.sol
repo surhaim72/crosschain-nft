@@ -7,16 +7,16 @@ import {Client} from "@chainlink/contracts-ccip/src/v0.8/ccip/libraries/Client.s
 import {CCIPReceiver} from "@chainlink/contracts-ccip/src/v0.8/ccip/applications/CCIPReceiver.sol";
 import {IERC20} from "@chainlink/contracts-ccip/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@chainlink/contracts-ccip/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/utils/SafeERC20.sol";
-import {MyToken} from "./MyToken.sol";
+import {WrappedNFT} from "./WrappedNFT.sol";
 
 /**
  * 这是一个示例合约，使用硬编码值以提高清晰度。
  * 这是一个使用未经审计代码的示例合约。
- * 不要在生产环境中使用此代码。
+ * 在生产环境中使用此代码。
  */
 
 // 一个用于跨链发送/接收字符串数据的简单消息合约。
-contract NFTPoolLockAndRelease is CCIPReceiver, OwnerIsCreator {
+contract NFTPoolBurnAndMint is CCIPReceiver, OwnerIsCreator {
     using SafeERC20 for IERC20;
 
     /**自定义错误说明**/ 
@@ -48,11 +48,11 @@ contract NFTPoolLockAndRelease is CCIPReceiver, OwnerIsCreator {
     );
 
     /**
-     * @dev 锁定NFT的event
-     * @param tokenId NFT的ID
-     * @param newOwner NFT的拥有者
-     **/            
-    event tokenUnlock(
+     * @dev 创建NFT的代币ID。
+     * @param tokenId 创建的代币ID。
+     * @param newOwner 代币的新拥有者。
+     **/
+    event tokenMinted(
         uint256 tokenId, 
         address newOwner
     );
@@ -64,17 +64,9 @@ contract NFTPoolLockAndRelease is CCIPReceiver, OwnerIsCreator {
     // LINK 代币合约的接口，用于支付跨链消息的费用
     IERC20 private s_linkToken;
     // 自定义 NFT 合约的实例
-    MyToken public nft;
+    WrappedNFT public wnft;
 
    
-   // 通过lockAndSendNFT函数发送我们所需要知道的数据，被锁定的pool NFT
-    // 包含tokenId和newOwner
-    struct RequestData {
-        uint256 tokenId;
-        address newOwner;   
-    }
-
-
     /**
      * @param _router CCIP Router 合约地址，用于跨链通信。
      * @param _link LINK 代币地址，用于支付跨链费用。
@@ -82,10 +74,19 @@ contract NFTPoolLockAndRelease is CCIPReceiver, OwnerIsCreator {
      */
     constructor(address _router, address _link,address ntfAddr) CCIPReceiver(_router) {
         s_linkToken = IERC20(_link);
-        nft = MyToken(ntfAddr);
+        wnft = WrappedNFT(ntfAddr);
     }
 
-  
+    // 通过lockAndSendNFT函数发送我们所需要知道的数据，被锁定的pool NFT
+    // 包含tokenId和newOwner
+    struct RequestData {
+        uint256 tokenId;
+        address newOwner;   
+    }
+     // 记得为变量添加可见性
+    mapping(uint256 => bool) public tokenLocked;
+
+    
     /**
      * @dev 修饰符用于检查接收者地址不为0。
      * @param _receiver 接收者地址。
@@ -95,15 +96,20 @@ contract NFTPoolLockAndRelease is CCIPReceiver, OwnerIsCreator {
         _;
     }
 
-    // 通过lockAndSendNFT函数发送我们所需要知道的数据，被锁定的pool
-    function lockAndSendNFT(
+    // 通过burnAndSendNFT函数发送我们所需要知道的数据，被锁定的pool
+    function burnAndSendNFT(
         uint256 tokentId,
         address newOwner,
         uint64 chainSelector,
         address receiver) public returns (bytes32){
         //将 NFT 转移到该地址以锁定 NFT
         // msg.sender 发送人 、address(this) 接收地址 、tokentId 发送人ID
-        nft.transferFrom(msg.sender, address(this), tokentId);
+        wnft.transferFrom(msg.sender, address(this), tokentId);
+
+        // 操作什么？
+        // 锁定 NFT后，立即燃烧它
+        wnft.burn(tokentId);
+
         // 合约数据区发送
         bytes memory payload = abi.encode(tokentId, newOwner);
         // 向目标链上的接收者发送数据。
@@ -171,7 +177,6 @@ contract NFTPoolLockAndRelease is CCIPReceiver, OwnerIsCreator {
         internal
         override
     {
-
         // 做了什么操作：
         // 解码接收到的跨链消息数据，将其转换为RequestData结构体
         RequestData memory requestData = abi.decode((any2EvmMessage.data),(RequestData));
@@ -179,19 +184,20 @@ contract NFTPoolLockAndRelease is CCIPReceiver, OwnerIsCreator {
         uint256 tokenId = requestData.tokenId;
         // 从解码后的数据中提取新的所有者地址
         address newOwner = requestData.newOwner; 
+        // 调用WNFT合约的mintWithSpecificTokenId方法为新所有者铸造指定tokenId的NFT
+        wnft.mintWithSpecificTokenId(newOwner, tokenId);
 
-        // 指定的 NFT 从当前合约地址转移给新的所有者。
-        nft.transferFrom(address(this), newOwner, tokenId);
-        // 将该 NFT 标记为未锁定状态。
-        emit tokenUnlock(tokenId, newOwner);
+        emit tokenMinted(tokenId, newOwner);
+
+       
     }
 
-    /// @notice 构造一个CCIP消息。
-    /// @dev 此函数将创建一个EVM2AnyMessage结构体，其中包含发送文本所需的所有信息。
-    /// @param _receiver 接收者的地址。
-    /// @param _data 要发送的字节数据。
-    /// @param _feeTokenAddress 用于支付费用的代币地址。设置为address(0)表示使用原生代币支付gas费用。
-    /// @return Client.EVM2AnyMessage 返回一个包含发送CCIP消息所需信息的EVM2AnyMessage结构体。
+        /// @notice 构造一个CCIP消息。
+        /// @dev 此函数将创建一个EVM2AnyMessage结构体，其中包含发送文本所需的所有信息。
+        /// @param _receiver 接收者的地址。
+        /// @param _data 要发送的字节数据。
+        /// @param _feeTokenAddress 用于支付费用的代币地址。设置为address(0)表示使用原生代币支付gas费用。
+        /// @return Client.EVM2AnyMessage 返回一个包含发送CCIP消息所需信息的EVM2AnyMessage结构体。
     function _buildCCIPMessage(
         address _receiver,
         bytes memory _data,
